@@ -1,14 +1,27 @@
-
+const http = require('http');
 const WebSocket = require('ws');
 
-// إنشاء السيرفر بدون منفذ افتراضي لضمان التوافق مع Railway
-const wss = new WebSocket.Server({ port: process.env.PORT });
+const server = http.createServer((req, res) => {
+  // إعداد رؤوس CORS
+  res.setHeader('Access-Control-Allow-Origin', 'https://www.speak5.com'); // أو حدد دومينك مباشرة: 'https://www.speak5.com'
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-// تخزين العملاء مع معرفهم
+  // التعامل مع طلبات preflight من المتصفح
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+  } else {
+    res.writeHead(200);
+    res.end('WebSocket server is running');
+  }
+});
+
+const wss = new WebSocket.Server({ server });
+
 const clients = {};
 
 wss.on('connection', (ws) => {
-  // تخزين معرف العميل مؤقتًا
   let clientId = null;
 
   ws.on('message', (message) => {
@@ -26,10 +39,9 @@ wss.on('connection', (ws) => {
 
     switch (type) {
       case 'register':
-        clientId = from; // حفظ معرف العميل
+        clientId = from;
         clients[from] = ws;
         console.log(`${from} registered`);
-        // إرسال رد تأكيد للعميل
         ws.send(JSON.stringify({ type: 'registered', from }));
         break;
 
@@ -68,5 +80,8 @@ wss.on('connection', (ws) => {
   });
 });
 
-// تسجيل حالة السيرفر
-console.log(`WebSocket server running on port ${process.env.PORT}`);
+// الاستماع على المنفذ المطلوب من Railway
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`WebSocket server running on port ${PORT}`);
+});
