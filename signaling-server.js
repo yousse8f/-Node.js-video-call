@@ -1,79 +1,53 @@
+const express = require('express');
 const http = require('http');
-const WebSocket = require('ws');
+const { Server } = require('socket.io');
+const cors = require('cors');
 
-// إنشاء سيرفر HTTP علشان Railway ويدعم WebSocket بنفس البورت
-const server = http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end('WebSocket server is running.');
+const app = express();
+const server = http.createServer(app);
+
+// إعدادات CORS
+const io = new Server(server, {
+  cors: {
+    origin: 'https://www.speak5.com', // موقعك
+    methods: ['GET', 'POST'],
+    credentials: true
+  }
 });
 
-// ربط WebSocket بالسيرفر HTTP
-const wss = new WebSocket.Server({ server });
+// معالجة الاتصالات
+io.on('connection', (socket) => {
+  console.log(`User connected: ${socket.id}`);
 
-// تخزين العملاء
-const clients = {};
-
-wss.on('connection', (ws) => {
-  let clientId = null;
-
-  ws.on('message', (message) => {
-    let data;
-
-    try {
-      data = JSON.parse(message);
-    } catch (e) {
-      console.log('Invalid JSON:', message);
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
-      return;
-    }
-
-    const { type, to, from } = data;
-
-    switch (type) {
-      case 'register':
-        clientId = from;
-        clients[from] = ws;
-        console.log(`${from} registered`);
-        ws.send(JSON.stringify({ type: 'registered', from }));
-        break;
-
-      case 'offer':
-      case 'answer':
-      case 'candidate':
-        if (clients[to]) {
-          clients[to].send(JSON.stringify(data));
-        } else {
-          ws.send(JSON.stringify({ type: 'error', message: `User ${to} not found` }));
-        }
-        break;
-
-      case 'leave':
-        if (clients[from]) {
-          clients[from].close();
-          delete clients[from];
-          clientId = null;
-        }
-        break;
-    }
+  socket.on('register', (data) => {
+    console.log(`${data.from} registered`);
+    socket.emit('registered', { from: data.from });
   });
 
-  ws.on('close', () => {
-    if (clientId && clients[clientId]) {
-      console.log(`${clientId} disconnected`);
-      delete clients[clientId];
-    }
+  socket.on('offer', (data) => {
+    io.to(data.to).emit('offer', data);
   });
 
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
-    if (clientId && clients[clientId]) {
-      delete clients[clientId];
-    }
+  socket.on('answer', (data) => {
+    io.to(data.to).emit('answer', data);
+  });
+
+  socket.on('candidate', (data) => {
+    io.to(data.to).emit('candidate', data);
+  });
+
+  socket.on('leave', (data) => {
+    console.log(`${data.from} left`);
+    socket.disconnect(true);
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`User disconnected: ${socket.id}`);
   });
 });
 
-// تشغيل السيرفر على البورت الصحيح
+// تشغيل السيرفر
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`WebSocket server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
