@@ -1,87 +1,162 @@
+const express = require('express');
+const app = express();
 const http = require('http');
-const WebSocket = require('ws');
-
-const server = http.createServer((req, res) => {
-  // إعداد رؤوس CORS
-  res.setHeader('Access-Control-Allow-Origin', 'https://www.speak5.com'); // أو حدد دومينك مباشرة: 'https://www.speak5.com'
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  // التعامل مع طلبات preflight من المتصفح
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-  } else {
-    res.writeHead(200);
-    res.end('WebSocket server is running');
-  }
+const server = http.createServer(app);
+const io = require('socket.io')(server, {
+    cors: {
+        origin: ["https://www.speak5.com", "http://localhost:3000"],
+        methods: ["GET", "POST"],
+        credentials: true,
+        allowedHeaders: ["Content-Type", "Authorization"]
+    },
+    transports: ['websocket', 'polling']
 });
 
-const wss = new WebSocket.Server({ server });
+// Store active calls and their participants
+const activeCalls = new Map();
 
-const clients = {};
+io.on('connection', (socket) => {
+    console.log('Client connected:', socket.id);
 
-wss.on('connection', (ws) => {
-  let clientId = null;
+    socket.on('join-call', (data) => {
+        const { callId, userId, name, role } = data;
 
-  ws.on('message', (message) => {
-    let data;
+        // Store user info in socket
+        socket.userId = userId;
+        socket.callId = callId;
+        socket.name = name;
+        socket.role = role;
 
-    try {
-      data = JSON.parse(message);
-    } catch (e) {
-      console.log('Invalid JSON:', message);
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
-      return;
-    }
+        // Join the call room
+        socket.join(callId);
 
-    const { type, to, from } = data;
-
-    switch (type) {
-      case 'register':
-        clientId = from;
-        clients[from] = ws;
-        console.log(`${from} registered`);
-        ws.send(JSON.stringify({ type: 'registered', from }));
-        break;
-
-      case 'offer':
-      case 'answer':
-      case 'candidate':
-        if (clients[to]) {
-          clients[to].send(JSON.stringify(data));
-        } else {
-          ws.send(JSON.stringify({ type: 'error', message: `User ${to} not found` }));
+        // Store call information
+        if (!activeCalls.has(callId)) {
+            activeCalls.set(callId, new Map());
         }
-        break;
+        activeCalls.get(callId).set(userId, {
+            socketId: socket.id,
+            name: name,
+            role: role
+        });
 
-      case 'leave':
-        if (clients[from]) {
-          clients[from].close();
-          delete clients[from];
-          clientId = null;
+        console.log(`User ${userId} (${role}) joined call ${callId}`);
+    });
+
+    socket.on('call-start-time', (data) => {
+        const { callId, startTime } = data;
+        // Broadcast start time to all participants in the call
+        io.to(callId).emit('call-start-time', {
+            callId,
+            startTime,
+            from: socket.userId
+        });
+    });
+
+    socket.on('webrtc-offer', (data) => {
+        const { to, from, offer, callId } = data;
+        const targetSocket = findSocketByUserId(to, callId);
+        if (targetSocket) {
+            targetSocket.emit('webrtc-offer', {
+                from,
+                offer,
+                callId
+            });
         }
-        break;
-    }
-  });
+    });
 
-  ws.on('close', () => {
-    if (clientId && clients[clientId]) {
-      console.log(`${clientId} disconnected`);
-      delete clients[clientId];
-    }
-  });
+    socket.on('webrtc-answer', (data) => {
+        const { to, from, answer, callId } = data;
+        const targetSocket = findSocketByUserId(to, callId);
+        if (targetSocket) {
+            targetSocket.emit('webrtc-answer', {
+                from,
+                answer,
+                callId
+            });
+        }
+    });
 
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
-    if (clientId && clients[clientId]) {
-      delete clients[clientId];
-    }
-  });
+    socket.on('webrtc-ice-candidate', (data) => {
+        const { to, from, candidate, callId } = data;
+        const targetSocket = findSocketByUserId(to, callId);
+        if (targetSocket) {
+            targetSocket.emit('webrtc-ice-candidate', {
+                from,
+                candidate,
+                callId
+            });
+        }
+    });
+
+    socket.on('chat-message', (data) => {
+        const { to, from, message, callId, timestamp } = data;
+        const targetSocket = findSocketByUserId(to, callId);
+        if (targetSocket) {
+            targetSocket.emit('chat-message', {
+                from,
+                message,
+                callId,
+                timestamp
+            });
+        }
+    });
+
+    socket.on('leave-call', (data) => {
+        const { callId, userId } = data;
+        if (activeCalls.has(callId)) {
+            activeCalls.get(callId).delete(userId);
+            if (activeCalls.get(callId).size === 0) {
+                activeCalls.delete(callId);
+            } else {
+                // Notify other participants
+                io.to(callId).emit('user-disconnected', {
+                    userId,
+                    callId
+                });
+            }
+        }
+        socket.leave(callId);
+    });
+
+    socket.on('disconnect', () => {
+        if (socket.callId && socket.userId) {
+            const callId = socket.callId;
+            if (activeCalls.has(callId)) {
+                activeCalls.get(callId).delete(socket.userId);
+                if (activeCalls.get(callId).size === 0) {
+                    activeCalls.delete(callId);
+                } else {
+                    // Notify other participants
+                    io.to(callId).emit('user-disconnected', {
+                        userId: socket.userId,
+                        callId
+                    });
+                }
+            }
+        }
+        console.log('Client disconnected:', socket.id);
+    });
 });
 
-// الاستماع على المنفذ المطلوب من Railway
+// Helper function to find socket by userId in a specific call
+function findSocketByUserId(userId, callId) {
+    if (activeCalls.has(callId)) {
+        const userInfo = activeCalls.get(callId).get(userId);
+        if (userInfo) {
+            return io.sockets.sockets.get(userInfo.socketId);
+        }
+    }
+    return null;
+}
+
+// Error handling
+io.on('error', (error) => {
+    console.error('Socket.IO error:', error);
+});
+
+// Start server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`WebSocket server running on port ${PORT}`);
-});
+    console.log(`Signaling server running on port ${PORT}`);
+}); 
